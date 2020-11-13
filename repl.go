@@ -12,23 +12,28 @@ import (
 )
 
 var lispyLexer = lexer.Must(ebnf.New(`
-                Symbol = "max" | "+" | "-" | "*" | "/" .
+                Symbol = "max" | "list" | "head" | "tail" | "join" | "eval" | "+" | "-" | "*" | "/" .
                 Float = ("." | digit) {"." | digit} .
                 Whitespace = " " | "\t" | "\n" | "\r" .
 		Punct = "!"…"/" | ":"…"@" | "["…` + "\"`\"" + ` | "{"…"~" .
                 digit = "0"…"9" .`))
 type LISPY struct {
-	Root *SExpression  `@@`
+	Expressions []*Expression `@@`
+}
+
+type QExpression struct {
+	Expressions []*Expression ` "{" @@* "}"`
 }
 
 type SExpression struct {
-	Expressions []*Expression ` "(" @@+ ")"`
+	Expressions []*Expression ` "(" @@* ")"`
 }
 
 type Expression struct {
 	Number        *float64     `      @Float `
 	Sym           *string      `|     @Symbol `
 	SExpression   *SExpression `|     @@ `
+	QExpression   *QExpression `|     @@ `
 }
 
 type LValType int
@@ -37,6 +42,7 @@ const (
 	LVAL_NUM
 	LVAL_SYM
 	LVAL_SEXPR
+	LVAL_QEXPR
 )
 
 type LVal struct {
@@ -64,6 +70,11 @@ func lvalSym(x string) *LVal {
 
 func lvalSexpr() *LVal {
 	val := LVal{ Type: LVAL_SEXPR }
+	return &val
+}
+
+func lvalQexpr() *LVal {
+	val := LVal{ Type: LVAL_QEXPR }
 	return &val
 }
 
@@ -113,14 +124,21 @@ func printLValExpr(l *LVal, openChar string, closeChar string) {
 func printLVal(l *LVal) {
 	switch l.Type {
 	case LVAL_NUM:
-		fmt.Println(l.Number)
+		fmt.Print(l.Number)
 	case LVAL_ERR:
-		fmt.Println(l.Err)
+		fmt.Print(l.Err)
 	case LVAL_SYM:
-		fmt.Println(l.Sym)
+		fmt.Print(l.Sym)
 	case LVAL_SEXPR:
 		printLValExpr(l, "(", ")")
+	case LVAL_QEXPR:
+		printLValExpr(l, "{", "}")
 	}
+}
+
+func lvalAdd(v *LVal, x *LVal) *LVal {
+	v.Cell = append(v.Cell, x)
+	return v
 }
 
 func lvalPop(v *LVal, i int) *LVal {
@@ -134,6 +152,88 @@ func lvalPop(v *LVal, i int) *LVal {
 func lvalTake(v *LVal, i int) *LVal {
 	x := lvalPop(v, i)
 	return x
+}
+
+func builtinHead(a *LVal) *LVal {
+	//There may have been more than one list in the lval or something
+	if len(a.Cell) != 1 {
+		return lvalErr("Function 'head' was given too many arguments")
+	}
+
+	//Not a q expression
+	if a.Cell[0].Type != LVAL_QEXPR {
+		return lvalErr("Function 'head' must be given a q expression as an argument")
+	}
+
+	//Head was passed in an empty list
+	if len(a.Cell[0].Cell) === 0 {
+		return lvalErr("Function 'head' passed in an empty q expression")
+	}
+
+	//Get the actual list out of the cell
+	v := lvalTake(a, 0)
+	//Remove everything from that list until we have just the lval of that list with one element(which is the head)
+	for len(v.Cell) > 1 {
+		_ := lvalPop(v, 1)
+	}
+	return v
+}
+
+func builtinTail(a *LVal) *LVal {
+	if len(a.Cell) != 1 {
+		return lvalErr("Function 'tail' was given too many arguments")
+	}
+
+	if a.Cell[0].Type != LVAL_QEXPR {
+		return lvalErr("Function 'tail' must be given a q expression as an argument")
+	}
+
+	if len(a.Cell[0].Cell) === 0 {
+		return lvalErr("Function 'tail' passed in an empty q expression")
+	}
+
+	return lvalPop(lvalTake(a, 0), 0)
+}
+
+func builtinList(a *LVal) *LVal {
+	a.Type = LVAL_QEXPR
+	return a
+}
+
+func builtinEval(a *LVal) LVal {
+	if len(a.Cell) != 1 {
+		return lvalErr("Function 'eval' given too many arguments")
+	}
+
+	if a.Cell[0].Type != LVAL_QEXPR {
+		return lvalErr("function 'eval' must be given a q expression as an argument")
+	}
+
+	x := lvalTake(a, 0)
+	x.Type = LVAL_SEXPR
+	return lval_eval(x)
+}
+
+func builtinJoin(a *LVal) LVal {
+	for i := 0; i < len(a.Cell); i++ {
+		if a.Cell[i].Type != LVAL_QEXPR {
+			return lvalErr("One of the arguments to join was not a q expression")
+		}
+	}
+
+	x := lvalPop(a, 0)
+	for len(a.Cell) > 0 {
+		x = lvalJoin(x, lvalPop(a, 0))
+	}
+	return x
+}
+
+func lvalJoin(a *LVal, b *LVal) {
+	for len(b.Cell) > 0 {
+		a = lvalAdd(a, lvalPop(b, 0))
+	}
+
+	return a
 }
 
 func builtinOp(a *LVal, op string) *LVal {
@@ -245,13 +345,18 @@ func lvalRead(node interface{}) *LVal {
 			for i := 0; i < len(node.SExpression.Expressions); i++ {
 				x.Cell = append(x.Cell, lvalRead(node.SExpression.Expressions[i]))
 			}
+		} else if node.QExpression != nil {
+			x = lvalQexpr()
+			for i := 0; i < len(node.QExpression.Expressions); i++ {
+				x.Cell = append(x.Cell, lvalRead(node.QExpression.Expressions[i]))
+			}
 		}
 	// If it's the root node, we return the lvalRead of each of the expressions, recursively building the lval tree structure depth first
 	case *LISPY:
 		x = lvalSexpr()
 		node, _ := node.(*LISPY)
-                for i := 0; i < len(node.Root.Expressions); i++ {
-                        x.Cell = append(x.Cell, lvalRead(node.Root.Expressions[i]))
+                for i := 0; i < len(node.Expressions); i++ {
+                        x.Cell = append(x.Cell, lvalRead(node.Expressions[i]))
                 }
 	// Same as the sexpresison above
 	case *SExpression:
@@ -260,6 +365,12 @@ func lvalRead(node interface{}) *LVal {
                 for i := 0; i < len(node.Expressions); i++ {
                         x.Cell = append(x.Cell, lvalRead(node.Expressions[i]))
                 }
+	case *QExpression:
+		x = lvalQexpr()
+		node, _ := node.(*QExpression)
+		for i := 0; i < len(node.Expressions); i++ {
+			x.Cell = append(x.Cell, lvalRead(node.Expressions[i]))
+		}
 	}
 
 	return x
@@ -281,7 +392,7 @@ func main() {
 
         for {
 		//Read
-                fmt.Print("Go-Lispy>")
+                fmt.Print("\nGo-Lispy>")
                 text, _ := reader.ReadString('\n')
                 text = strings.Replace(text, "\n", "", -1)
 		//Parse
