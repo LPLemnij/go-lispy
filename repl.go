@@ -166,7 +166,7 @@ func builtinHead(a *LVal) *LVal {
 	}
 
 	//Head was passed in an empty list
-	if len(a.Cell[0].Cell) === 0 {
+	if len(a.Cell[0].Cell) == 0 {
 		return lvalErr("Function 'head' passed in an empty q expression")
 	}
 
@@ -174,7 +174,7 @@ func builtinHead(a *LVal) *LVal {
 	v := lvalTake(a, 0)
 	//Remove everything from that list until we have just the lval of that list with one element(which is the head)
 	for len(v.Cell) > 1 {
-		_ := lvalPop(v, 1)
+		_ = lvalPop(v, 1)
 	}
 	return v
 }
@@ -188,11 +188,13 @@ func builtinTail(a *LVal) *LVal {
 		return lvalErr("Function 'tail' must be given a q expression as an argument")
 	}
 
-	if len(a.Cell[0].Cell) === 0 {
+	if len(a.Cell[0].Cell) == 0 {
 		return lvalErr("Function 'tail' passed in an empty q expression")
 	}
 
-	return lvalPop(lvalTake(a, 0), 0)
+	v := lvalTake(a, 0)
+	v.Cell = v.Cell[1:]
+	return v
 }
 
 func builtinList(a *LVal) *LVal {
@@ -200,7 +202,7 @@ func builtinList(a *LVal) *LVal {
 	return a
 }
 
-func builtinEval(a *LVal) LVal {
+func builtinEval(a *LVal) *LVal {
 	if len(a.Cell) != 1 {
 		return lvalErr("Function 'eval' given too many arguments")
 	}
@@ -211,10 +213,10 @@ func builtinEval(a *LVal) LVal {
 
 	x := lvalTake(a, 0)
 	x.Type = LVAL_SEXPR
-	return lval_eval(x)
+	return lvalEval(x)
 }
 
-func builtinJoin(a *LVal) LVal {
+func builtinJoin(a *LVal) *LVal {
 	for i := 0; i < len(a.Cell); i++ {
 		if a.Cell[i].Type != LVAL_QEXPR {
 			return lvalErr("One of the arguments to join was not a q expression")
@@ -228,12 +230,37 @@ func builtinJoin(a *LVal) LVal {
 	return x
 }
 
-func lvalJoin(a *LVal, b *LVal) {
+func lvalJoin(a *LVal, b *LVal) *LVal {
 	for len(b.Cell) > 0 {
 		a = lvalAdd(a, lvalPop(b, 0))
 	}
 
 	return a
+}
+
+func builtin(a *LVal, function string) *LVal {
+	switch function {
+	case "list":
+		return builtinList(a)
+	case "head":
+		return builtinHead(a)
+	case "tail":
+		return builtinTail(a)
+	case "join":
+		return builtinJoin(a)
+	case "eval":
+		return builtinEval(a)
+	case "+":
+		return builtinOp(a, function)
+	case "-":
+		return builtinOp(a, function)
+	case "*":
+		return builtinOp(a, function)
+	case "/":
+		return builtinOp(a, function)
+	default:
+		return lvalErr("Unknown function")
+	}
 }
 
 func builtinOp(a *LVal, op string) *LVal {
@@ -310,7 +337,7 @@ func lvalEvalSexpr(v *LVal) *LVal {
 	}
 
 	//Run the operation using the currnet lval and the input symbol
-	result := builtinOp(v, f.Sym)
+	result := builtin(v, f.Sym)
 	return result
 }
 
