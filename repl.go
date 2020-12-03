@@ -4,12 +4,12 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 
 	"github.com/alecthomas/participle"
 	"github.com/alecthomas/participle/lexer"
 	"github.com/alecthomas/participle/lexer/ebnf"
-	"github.com/davecgh/go-spew/spew"
 )
 
 var lispyLexer = lexer.Must(ebnf.New(`
@@ -176,8 +176,6 @@ func printLVal(l *LVal) {
 }
 
 func lenvGet(env *LEnv, x *LVal) *LVal {
-	fmt.Print("The environment we are getting from: ")
-	spew.Dump(env)
 	// Check if the requested symbol is in the environment and get it. If not, error
 	for i := 0; i < len(env.Syms); i++ {
 		if env.Syms[i] == x.Sym {
@@ -194,10 +192,6 @@ func lenvGet(env *LEnv, x *LVal) *LVal {
 }
 
 func lenvPut(env *LEnv, key *LVal, val *LVal) {
-	fmt.Println("The key to append it to: ")
-	spew.Dump(key)
-	fmt.Println("The value to add to the environment: ")
-	spew.Dump(val)
 	//Check if the symbol is already in there. If so, overwrite the value and add the new definition
 	for i := 0; i < len(env.Syms); i++ {
 		if env.Syms[i] == key.Sym {
@@ -209,9 +203,6 @@ func lenvPut(env *LEnv, key *LVal, val *LVal) {
 	//If not, append the symbol to the environment and the value to the values of the environment
 	env.Syms = append(env.Syms, key.Sym)
 	env.Vals = append(env.Vals, lvalCopy(val))
-
-	fmt.Println("After putting to environment: ")
-	spew.Dump(env)
 }
 
 func lenvDef(env *LEnv, key *LVal, val *LVal) {
@@ -409,7 +400,18 @@ func lvalCall(e *LEnv, f *LVal, a *LVal) *LVal {
 		}
 
 		sym := lvalPop(f.Formals, 0)
+
+		if sym.Sym == "&" {
+			if len(f.Formals.Cell) != 1 {
+				return lvalErr("Symbol & not followed by a single symbol.")
+			}
+
+			nsym := lvalPop(f.Formals, 0)
+			lenvPut(f.Env, nsym, builtinList(e, a))
+		}
+
 		val := lvalPop(a, 0)
+
 		lenvPut(f.Env, sym, val)
 	}
 
@@ -452,6 +454,12 @@ func lenvAddBuiltins(e *LEnv) {
 	lenvAddBuiltin(e, "-", builtinSubtract)
 	lenvAddBuiltin(e, "*", builtinMultiply)
 	lenvAddBuiltin(e, "/", builtinDivide)
+	lenvAddBuiltin(e, "<", builtinLessThan)
+	lenvAddBuiltin(e, ">", builtinGreaterThan)
+	lenvAddBuiltin(e, "<=", builtinLessThanOrEqualTo)
+	lenvAddBuiltin(e, ">=", builtinGreaterThanOrEqualTo)
+	lenvAddBuiltin(e, "==", builtinEq)
+	lenvAddBuiltin(e, "if", builtinIf)
 }
 
 func builtinVar(e *LEnv, a *LVal, op string) *LVal {
@@ -503,6 +511,133 @@ func builtinMultiply(e *LEnv, a *LVal) *LVal {
 
 func builtinDivide(e *LEnv, a *LVal) *LVal {
 	return builtinOp(e, a, "/")
+}
+
+func builtinLessThan(e *LEnv, a *LVal) *LVal {
+	return builtinCond(e, a, "<")
+}
+
+func builtinGreaterThan(e *LEnv, a *LVal) *LVal {
+	return builtinCond(e, a, ">")
+}
+
+func builtinGreaterThanOrEqualTo(e *LEnv, a *LVal) *LVal {
+	return builtinCond(e, a, ">=")
+}
+
+func builtinLessThanOrEqualTo(e *LEnv, a *LVal) *LVal {
+	return builtinCond(e, a, "<=")
+}
+
+func builtinEq(e *LEnv, a *LVal) *LVal {
+	return builtinCond(e, a, "==")
+}
+
+func builtinIf(e *LEnv, a *LVal) *LVal {
+	if len(a.Cell) != 3 {
+		return lvalErr("The if condition must be passed in three arguments.")
+	}
+
+	if a.Cell[0].Type != LVAL_NUM {
+		return lvalErr("The if condition's first arugment must be of type num")
+	}
+	if a.Cell[1].Type != LVAL_QEXPR {
+		return lvalErr("The if condition's second argument must be of type qexpr")
+	}
+
+	if a.Cell[2].Type != LVAL_QEXPR {
+		return lvalErr("The if condition's third argument must be of type qexpr.")
+	}
+
+	var x *LVal
+	a.Cell[1].Type = LVAL_SEXPR
+	a.Cell[2].Type = LVAL_SEXPR
+
+	if a.Cell[0].Number != 1 {
+		x = lvalEval(e, lvalPop(a, 2))
+	} else {
+		x = lvalEval(e, lvalPop(a, 1))
+	}
+
+	return x
+}
+func builtinCond(e *LEnv, a *LVal, cond string) *LVal {
+	x := LVal{Type: LVAL_NUM, Number: 0}
+
+	firstArg := lvalPop(a, 0)
+	secondArg := lvalPop(a, 0)
+
+	if cond == "<" {
+		if firstArg.Number < secondArg.Number {
+			x.Number = 1
+		}
+	}
+
+	if cond == "<=" {
+		if firstArg.Number <= secondArg.Number {
+			x.Number = 1
+		}
+	}
+
+	if cond == ">" {
+		if firstArg.Number > secondArg.Number {
+			x.Number = 1
+		}
+	}
+
+	if cond == ">=" {
+		if firstArg.Number >= secondArg.Number {
+			x.Number = 1
+		}
+	}
+
+	// Equality has to be a different thing since we don't only mess with numbers
+	if cond == "==" {
+		eq := lvalEq(firstArg, secondArg)
+		if eq == true {
+			x.Number = 1
+		}
+	}
+
+	return &x
+}
+
+func lvalEq(firstArg *LVal, secondArg *LVal) bool {
+	if firstArg.Type != secondArg.Type {
+		return false
+	}
+
+	switch firstArg.Type {
+	case LVAL_NUM:
+		return firstArg.Number == secondArg.Number
+	case LVAL_ERR:
+		return firstArg.Err == secondArg.Err
+	case LVAL_SYM:
+		return firstArg.Sym == secondArg.Sym
+	case LVAL_FUN:
+		if firstArg.Builtin != nil || secondArg.Builtin != nil {
+			return reflect.ValueOf(firstArg.Builtin) == reflect.ValueOf(secondArg.Builtin)
+		}
+
+		return lvalEq(firstArg.Formals, secondArg.Formals) && lvalEq(firstArg.Body, secondArg.Body)
+
+	case LVAL_QEXPR:
+		fallthrough
+	case LVAL_SEXPR:
+		if len(firstArg.Cell) != len(secondArg.Cell) {
+			return false
+		}
+
+		for i := 0; i < len(firstArg.Cell); i++ {
+			if !lvalEq(firstArg.Cell[i], secondArg.Cell[i]) {
+				return false
+			}
+		}
+
+		return true
+	}
+
+	return false
 }
 
 func builtinOp(e *LEnv, a *LVal, op string) *LVal {
