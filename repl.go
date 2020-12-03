@@ -1,22 +1,25 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"strings"
-	"bufio"
-	//"encoding/json"
+
 	"github.com/alecthomas/participle"
 	"github.com/alecthomas/participle/lexer"
 	"github.com/alecthomas/participle/lexer/ebnf"
+	"github.com/davecgh/go-spew/spew"
 )
 
 var lispyLexer = lexer.Must(ebnf.New(`
-                Symbol = "max" | "list" | "head" | "tail" | "join" | "eval" | "+" | "-" | "*" | "/" .
-                Float = ("." | digit) {"." | digit} .
+                digit = "0"…"9" . 
+		Float = ("." | digit) {"." | digit} .
+                Symbol = ("a"…"z" | "A"…"Z" | "0"…"9" | "+" | "-" | "*" | "/" | "_" | "=" | "<" | ">" | "!" | "&") { "a"…"z" | "A"…"Z" | "0"…"9" | "+" | "-" | "*" | "/" | "_" | "=" | "<" | ">" | "!" | "&"} .
                 Whitespace = " " | "\t" | "\n" | "\r" .
 		Punct = "!"…"/" | ":"…"@" | "["…` + "\"`\"" + ` | "{"…"~" .
-                digit = "0"…"9" .`))
+                `))
+
 type LISPY struct {
 	Expressions []*Expression `@@`
 }
@@ -30,68 +33,94 @@ type SExpression struct {
 }
 
 type Expression struct {
-	Number        *float64     `      @Float `
-	Sym           *string      `|     @Symbol `
-	SExpression   *SExpression `|     @@ `
-	QExpression   *QExpression `|     @@ `
+	Number      *float64     `      @Float `
+	Sym         *string      `|     @Symbol `
+	SExpression *SExpression `|     @@ `
+	QExpression *QExpression `|     @@ `
 }
 
+type LBuiltin func(*LEnv, *LVal) *LVal
+
 type LValType int
+
 const (
 	LVAL_ERR LValType = iota
 	LVAL_NUM
 	LVAL_SYM
 	LVAL_SEXPR
 	LVAL_QEXPR
+	LVAL_FUN
 )
 
 type LVal struct {
+	// Type
+	Type LValType
+
+	// Basic
 	Number float64
-	Type   LValType
 	Err    string
 	Sym    string
-	Cell   []*LVal
+
+	// Function
+	Builtin LBuiltin
+	Env     *LEnv
+	Formals *LVal
+	Body    *LVal
+
+	// Cells
+	Cell []*LVal
+}
+
+type LEnv struct {
+	Par  *LEnv
+	Syms []string
+	Vals []*LVal
+}
+
+func lvalFun(builtin LBuiltin) *LVal {
+	val := LVal{Type: LVAL_FUN, Builtin: builtin}
+	return &val
 }
 
 func lvalNum(x float64) *LVal {
-	val := LVal{ Type: LVAL_NUM, Number: x }
+	val := LVal{Type: LVAL_NUM, Number: x}
 	return &val
 }
 
 func lvalErr(x string) *LVal {
-	val := LVal{ Type: LVAL_ERR, Err: x }
+	val := LVal{Type: LVAL_ERR, Err: x}
 	return &val
 }
 
 func lvalSym(x string) *LVal {
-	val := LVal{ Type: LVAL_SYM, Sym: x}
+	val := LVal{Type: LVAL_SYM, Sym: x}
 	return &val
 }
 
 func lvalSexpr() *LVal {
-	val := LVal{ Type: LVAL_SEXPR }
+	val := LVal{Type: LVAL_SEXPR}
 	return &val
 }
 
 func lvalQexpr() *LVal {
-	val := LVal{ Type: LVAL_QEXPR }
+	val := LVal{Type: LVAL_QEXPR}
 	return &val
 }
 
 func add(a float64, b float64) float64 {
-        return a + b
+	return a + b
 }
 
 func subtract(a float64, b float64) float64 {
-        return a - b
+	return a - b
 }
 
 func multiply(a float64, b float64) float64 {
-        return a * b
+	return a * b
 }
 
 func divide(a float64, b float64) float64 {
-        return a / b
+	return a / b
 }
 
 func max(a float64, b float64) float64 {
@@ -113,7 +142,7 @@ func printLValExpr(l *LVal, openChar string, closeChar string) {
 
 	for i := 0; i < len(l.Cell); i++ {
 		printLVal(l.Cell[i])
-		if i != len(l.Cell) - 1 {
+		if i != len(l.Cell)-1 {
 			fmt.Print(" ")
 		}
 	}
@@ -133,7 +162,63 @@ func printLVal(l *LVal) {
 		printLValExpr(l, "(", ")")
 	case LVAL_QEXPR:
 		printLValExpr(l, "{", "}")
+	case LVAL_FUN:
+		if l.Builtin != nil {
+			fmt.Println("builtin")
+		} else {
+			fmt.Print("(\\ ")
+			printLVal(l.Formals)
+			fmt.Print(" ")
+			printLVal(l.Body)
+			fmt.Print(")")
+		}
 	}
+}
+
+func lenvGet(env *LEnv, x *LVal) *LVal {
+	fmt.Print("The environment we are getting from: ")
+	spew.Dump(env)
+	// Check if the requested symbol is in the environment and get it. If not, error
+	for i := 0; i < len(env.Syms); i++ {
+		if env.Syms[i] == x.Sym {
+			return lvalCopy(env.Vals[i])
+		}
+	}
+
+	// If not in the environment, it may be in the parent environment
+	if env.Par != nil {
+		return lenvGet(env.Par, x)
+	} else {
+		return lvalErr("Unbound Symbol")
+	}
+}
+
+func lenvPut(env *LEnv, key *LVal, val *LVal) {
+	fmt.Println("The key to append it to: ")
+	spew.Dump(key)
+	fmt.Println("The value to add to the environment: ")
+	spew.Dump(val)
+	//Check if the symbol is already in there. If so, overwrite the value and add the new definition
+	for i := 0; i < len(env.Syms); i++ {
+		if env.Syms[i] == key.Sym {
+			env.Vals[i] = lvalCopy(val)
+			return
+		}
+	}
+
+	//If not, append the symbol to the environment and the value to the values of the environment
+	env.Syms = append(env.Syms, key.Sym)
+	env.Vals = append(env.Vals, lvalCopy(val))
+
+	fmt.Println("After putting to environment: ")
+	spew.Dump(env)
+}
+
+func lenvDef(env *LEnv, key *LVal, val *LVal) {
+	for env.Par != nil {
+		env = env.Par
+	}
+	lenvPut(env, key, val)
 }
 
 func lvalAdd(v *LVal, x *LVal) *LVal {
@@ -148,13 +233,60 @@ func lvalPop(v *LVal, i int) *LVal {
 	return x
 }
 
+func lvalCopy(v *LVal) *LVal {
+	x := LVal{Cell: make([]*LVal, 0)}
+	x.Type = v.Type
+
+	switch v.Type {
+	case LVAL_FUN:
+		if v.Builtin != nil {
+			x.Builtin = v.Builtin
+		} else {
+			x.Builtin = nil
+			x.Env = lenvCopy(v.Env)
+			x.Formals = lvalCopy(v.Formals)
+			x.Body = lvalCopy(v.Body)
+		}
+	case LVAL_NUM:
+		x.Number = v.Number
+	case LVAL_ERR:
+		x.Err = v.Err
+	case LVAL_SYM:
+		x.Sym = v.Sym
+	case LVAL_SEXPR:
+		for i := 0; i < len(v.Cell); i++ {
+			x.Cell = append(x.Cell, lvalCopy(v.Cell[i]))
+		}
+	case LVAL_QEXPR:
+		for i := 0; i < len(v.Cell); i++ {
+			x.Cell = append(x.Cell, lvalCopy(v.Cell[i]))
+		}
+	}
+
+	return &x
+}
+
+func lenvCopy(env *LEnv) *LEnv {
+	x := LEnv{Syms: make([]string, 0), Vals: make([]*LVal, 0)}
+	x.Par = env.Par
+
+	for i := 0; i < len(env.Syms); i++ {
+		x.Syms = append(x.Syms, env.Syms[i])
+	}
+	for i := 0; i < len(env.Vals); i++ {
+		x.Vals = append(x.Vals, lvalCopy(env.Vals[i]))
+	}
+
+	return &x
+}
+
 //Probably don't need this since garbage collection
 func lvalTake(v *LVal, i int) *LVal {
 	x := lvalPop(v, i)
 	return x
 }
 
-func builtinHead(a *LVal) *LVal {
+func builtinHead(e *LEnv, a *LVal) *LVal {
 	//There may have been more than one list in the lval or something
 	if len(a.Cell) != 1 {
 		return lvalErr("Function 'head' was given too many arguments")
@@ -179,7 +311,32 @@ func builtinHead(a *LVal) *LVal {
 	return v
 }
 
-func builtinTail(a *LVal) *LVal {
+func builtinLambda(e *LEnv, a *LVal) *LVal {
+	if len(a.Cell) != 2 {
+		return lvalErr("Lambda was given an improper number of arguments")
+	}
+
+	if a.Cell[0].Type != LVAL_QEXPR {
+		return lvalErr("First argument was not a q expression")
+	}
+
+	if a.Cell[1].Type != LVAL_QEXPR {
+		return lvalErr("Second argument was not a q expression")
+	}
+
+	for i := 0; i < len(a.Cell[0].Cell); i++ {
+		if a.Cell[0].Cell[i].Type != LVAL_SYM {
+			return lvalErr("First argument must contain list of symbols")
+		}
+	}
+
+	formals := lvalPop(a, 0)
+	body := lvalPop(a, 0)
+
+	return lvalLambda(formals, body)
+}
+
+func builtinTail(e *LEnv, a *LVal) *LVal {
 	if len(a.Cell) != 1 {
 		return lvalErr("Function 'tail' was given too many arguments")
 	}
@@ -197,12 +354,12 @@ func builtinTail(a *LVal) *LVal {
 	return v
 }
 
-func builtinList(a *LVal) *LVal {
+func builtinList(e *LEnv, a *LVal) *LVal {
 	a.Type = LVAL_QEXPR
 	return a
 }
 
-func builtinEval(a *LVal) *LVal {
+func builtinEval(e *LEnv, a *LVal) *LVal {
 	if len(a.Cell) != 1 {
 		return lvalErr("Function 'eval' given too many arguments")
 	}
@@ -213,10 +370,11 @@ func builtinEval(a *LVal) *LVal {
 
 	x := lvalTake(a, 0)
 	x.Type = LVAL_SEXPR
-	return lvalEval(x)
+
+	return lvalEval(e, x)
 }
 
-func builtinJoin(a *LVal) *LVal {
+func builtinJoin(e *LEnv, a *LVal) *LVal {
 	for i := 0; i < len(a.Cell); i++ {
 		if a.Cell[i].Type != LVAL_QEXPR {
 			return lvalErr("One of the arguments to join was not a q expression")
@@ -238,32 +396,116 @@ func lvalJoin(a *LVal, b *LVal) *LVal {
 	return a
 }
 
-func builtin(a *LVal, function string) *LVal {
-	switch function {
-	case "list":
-		return builtinList(a)
-	case "head":
-		return builtinHead(a)
-	case "tail":
-		return builtinTail(a)
-	case "join":
-		return builtinJoin(a)
-	case "eval":
-		return builtinEval(a)
-	case "+":
-		return builtinOp(a, function)
-	case "-":
-		return builtinOp(a, function)
-	case "*":
-		return builtinOp(a, function)
-	case "/":
-		return builtinOp(a, function)
-	default:
-		return lvalErr("Unknown function")
+func lvalCall(e *LEnv, f *LVal, a *LVal) *LVal {
+	//If it is a builtin function, return the result of running that function
+	if f.Builtin != nil {
+		return f.Builtin(e, a)
+	}
+
+	//Bind the arguments that were passed into the function
+	for len(a.Cell) > 0 {
+		if len(f.Formals.Cell) == 0 {
+			return lvalErr("Function passed too many arguments")
+		}
+
+		sym := lvalPop(f.Formals, 0)
+		val := lvalPop(a, 0)
+		lenvPut(f.Env, sym, val)
+	}
+
+	if len(f.Formals.Cell) == 0 {
+		f.Env.Par = e
+
+		return builtinEval(f.Env, lvalAdd(lvalSexpr(), lvalCopy(f.Body)))
+	} else {
+		return lvalCopy(f)
 	}
 }
 
-func builtinOp(a *LVal, op string) *LVal {
+func lvalLambda(formals *LVal, body *LVal) *LVal {
+	v := LVal{Type: LVAL_FUN}
+
+	v.Builtin = nil
+	v.Env = &LEnv{Syms: make([]string, 0), Vals: make([]*LVal, 0)}
+	v.Formals = formals
+	v.Body = body
+
+	return &v
+}
+
+func lenvAddBuiltin(e *LEnv, name string, f LBuiltin) {
+	k := lvalSym(name)
+	v := lvalFun(f)
+	lenvPut(e, k, v)
+}
+
+func lenvAddBuiltins(e *LEnv) {
+	lenvAddBuiltin(e, "list", builtinList)
+	lenvAddBuiltin(e, "head", builtinHead)
+	lenvAddBuiltin(e, "tail", builtinTail)
+	lenvAddBuiltin(e, "eval", builtinEval)
+	lenvAddBuiltin(e, "join", builtinJoin)
+	lenvAddBuiltin(e, "def", builtinDef)
+	lenvAddBuiltin(e, "=", builtinPut)
+	lenvAddBuiltin(e, "fn", builtinLambda)
+	lenvAddBuiltin(e, "+", builtinAdd)
+	lenvAddBuiltin(e, "-", builtinSubtract)
+	lenvAddBuiltin(e, "*", builtinMultiply)
+	lenvAddBuiltin(e, "/", builtinDivide)
+}
+
+func builtinVar(e *LEnv, a *LVal, op string) *LVal {
+	//When using def, we make sure that the first parameter is a list of symbols
+	syms := a.Cell[0]
+	for i := 0; i < len(syms.Cell); i++ {
+		if syms.Cell[i].Type != LVAL_SYM {
+			return lvalErr("Function def cannot define a non symbol")
+		}
+	}
+
+	//Check if the lists match
+	if len(syms.Cell) != len(a.Cell)-1 {
+		return lvalErr("The symbol list and the value list are different lengths")
+	}
+
+	for i := 0; i < len(syms.Cell); i++ {
+		if op == "def" {
+			lenvDef(e, syms.Cell[i], a.Cell[i+1])
+		}
+
+		if op == "=" {
+			lenvPut(e, syms.Cell[i], a.Cell[i+1])
+		}
+	}
+
+	return lvalSexpr()
+}
+
+func builtinDef(e *LEnv, a *LVal) *LVal {
+	return builtinVar(e, a, "def")
+}
+
+func builtinPut(e *LEnv, a *LVal) *LVal {
+	return builtinVar(e, a, "=")
+}
+
+func builtinAdd(e *LEnv, a *LVal) *LVal {
+	return builtinOp(e, a, "+")
+}
+
+func builtinSubtract(e *LEnv, a *LVal) *LVal {
+	return builtinOp(e, a, "-")
+}
+
+func builtinMultiply(e *LEnv, a *LVal) *LVal {
+	return builtinOp(e, a, "*")
+}
+
+func builtinDivide(e *LEnv, a *LVal) *LVal {
+	return builtinOp(e, a, "/")
+}
+
+func builtinOp(e *LEnv, a *LVal, op string) *LVal {
 	// Make sure all arguments are numbers so we can eval
 	for i := 0; i < len(a.Cell); i++ {
 		if a.Cell[i].Type != LVAL_NUM {
@@ -303,17 +545,17 @@ func builtinOp(a *LVal, op string) *LVal {
 	return x
 }
 
-func lvalEvalSexpr(v *LVal) *LVal {
+func lvalEvalSexpr(e *LEnv, v *LVal) *LVal {
 	// Evaluate Children
 	//The recursive case is a bit confusing but you basically just assume you have an lvalEval that works correctly and go through the children and evaulate them
 	// The interaction between lvalEvalSexpr and lvalEval is what recursively evaluates the structure and goes deep into the nested sexpressions, evaluating the deepst first
 	for i := 0; i < len(v.Cell); i++ {
-		v.Cell[i] = lvalEval(v.Cell[i])
+		v.Cell[i] = lvalEval(e, v.Cell[i])
 	}
 
-	//Check for an error type lval in the evaluation. If found, return that lval 
+	//Check for an error type lval in the evaluation. If found, return that lval
 	//using lvalTake
-	for i:= 0; i < len(v.Cell); i++ {
+	for i := 0; i < len(v.Cell); i++ {
 		if v.Cell[i].Type == LVAL_ERR {
 			return lvalTake(v, i)
 		}
@@ -324,7 +566,7 @@ func lvalEvalSexpr(v *LVal) *LVal {
 		return v
 	}
 
-	//If the cell has length 1, it looks like (1) and we just want to return the 
+	//If the cell has length 1, it looks like (1) and we just want to return the
 	//lval representing the number 1
 	if len(v.Cell) == 1 {
 		return lvalTake(v, 0)
@@ -332,25 +574,31 @@ func lvalEvalSexpr(v *LVal) *LVal {
 
 	//Ensure that the first lval in the s-expression is a symbol
 	f := lvalPop(v, 0)
-	if f.Type != LVAL_SYM {
-		return lvalErr("S-Expression does not start with symbol")
+	if f.Type != LVAL_FUN {
+		return lvalErr("First Element is not a function")
 	}
 
 	//Run the operation using the currnet lval and the input symbol
-	result := builtin(v, f.Sym)
+	result := lvalCall(e, f, v)
 	return result
 }
 
 // Evaluating the actual numberical result of the sexpression
-func lvalEval(v *LVal) *LVal {
+func lvalEval(e *LEnv, v *LVal) *LVal {
+	if v.Type == LVAL_SYM {
+		x := lenvGet(e, v)
+		return x
+	}
+
 	// If this is a lval representation of an sexpression, we evaluate that
 	if v.Type == LVAL_SEXPR {
-		return lvalEvalSexpr(v)
+		return lvalEvalSexpr(e, v)
 	}
 
 	// Otherwise, we just return the lval representation as it is since it is either an lval representing a number or a symbol or error already
 	return v
 }
+
 //Takes a parser node(Lispy, Expression, or SExpression and turns it into an interpreter lval node)
 func lvalRead(node interface{}) *LVal {
 	var x *LVal
@@ -382,16 +630,16 @@ func lvalRead(node interface{}) *LVal {
 	case *LISPY:
 		x = lvalSexpr()
 		node, _ := node.(*LISPY)
-                for i := 0; i < len(node.Expressions); i++ {
-                        x.Cell = append(x.Cell, lvalRead(node.Expressions[i]))
-                }
+		for i := 0; i < len(node.Expressions); i++ {
+			x.Cell = append(x.Cell, lvalRead(node.Expressions[i]))
+		}
 	// Same as the sexpresison above
 	case *SExpression:
 		x = lvalSexpr()
 		node, _ := node.(*SExpression)
-                for i := 0; i < len(node.Expressions); i++ {
-                        x.Cell = append(x.Cell, lvalRead(node.Expressions[i]))
-                }
+		for i := 0; i < len(node.Expressions); i++ {
+			x.Cell = append(x.Cell, lvalRead(node.Expressions[i]))
+		}
 	case *QExpression:
 		x = lvalQexpr()
 		node, _ := node.(*QExpression)
@@ -404,24 +652,26 @@ func lvalRead(node interface{}) *LVal {
 }
 
 func main() {
+	e := &LEnv{Syms: make([]string, 0), Vals: make([]*LVal, 0)}
+	lenvAddBuiltins(e)
 	reader := bufio.NewReader(os.Stdin)
 	lispyRootNode := &LISPY{}
 	lispyParser, err := participle.Build(&LISPY{},
-			    participle.Lexer(lispyLexer),
-			    participle.Elide("Whitespace"),
-			)
+		participle.Lexer(lispyLexer),
+		participle.Elide("Whitespace"),
+	)
 
 	if err != nil {
 		fmt.Println(err)
 	}
 
-        fmt.Println("My Go Lisp v1")
+	fmt.Println("My Go Lisp v1")
 
-        for {
+	for {
 		//Read
-                fmt.Print("\nGo-Lispy>")
-                text, _ := reader.ReadString('\n')
-                text = strings.Replace(text, "\n", "", -1)
+		fmt.Print("\nGo-Lispy>")
+		text, _ := reader.ReadString('\n')
+		text = strings.Replace(text, "\n", "", -1)
 		//Parse
 		err = lispyParser.ParseString(text, lispyRootNode)
 
@@ -430,12 +680,9 @@ func main() {
 			return
 		}
 
-
 		//j, _ := json.Marshal(lvalRead(lispyRootNode))
 		//fmt.Println(string(j))
-
-		printLVal(lvalEval(lvalRead(lispyRootNode)))
-        }
-
+		printLVal(lvalEval(e, lvalRead(lispyRootNode)))
+	}
 
 }
