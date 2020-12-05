@@ -7,3 +7,5 @@ Potential future plans:
 2. Add golang interop with the golang standard library as this would provide huge levels of functionality
 3. Define a standard library for this lisp that just wraps around the golang stl.
 4. Add better error handling and prettier printing.
+
+This was an excercise based on the book found at buildyourownlisp.com. The book originally has it in C so I translated that and added/improved on some things.
